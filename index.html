@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RetroPlayer — M3U Music Player</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=VT323&family=Press+Start+2P&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+
+  <!-- Hidden audio element controlled by JS -->
+  <audio id="audio" preload="auto"></audio>
+
+  <!-- Hidden file input for m3u upload -->
+  <input type="file" id="file-input" accept=".m3u,.m3u8,audio/x-mpegurl" hidden>
+
+  <!-- Drop overlay shown while dragging files (desktop only) -->
+  <div id="drop-overlay" class="drop-overlay" hidden>
+    <div class="drop-overlay__inner">
+      <div class="drop-overlay__icon">▼</div>
+      <div class="drop-overlay__text">Drop your .m3u playlist here</div>
+    </div>
+  </div>
+
+  <!-- Mobile tab bar (visible only on mobile via CSS) -->
+  <nav id="mobile-tabs" class="mobile-tabs" role="tablist">
+    <button class="mobile-tab is-active" data-tab="main"     role="tab">▶ NOW</button>
+    <button class="mobile-tab"           data-tab="playlist" role="tab">≡ PLAYLIST</button>
+    <button class="mobile-tab"           data-tab="library"  role="tab">★ LIBRARY</button>
+  </nav>
+
+  <!-- Generic modal -->
+  <div id="modal" class="modal" hidden>
+    <div class="modal__backdrop" data-modal-close></div>
+    <div class="modal__window window" role="dialog" aria-modal="true">
+      <header class="window__title">
+        <span class="window__title-text" id="modal-title">DIALOG</span>
+        <button class="modal__close" data-modal-close title="Close">✕</button>
+      </header>
+      <div class="modal__body">
+        <p class="modal__message" id="modal-message"></p>
+        <input type="text" id="modal-input" class="modal__input" placeholder="">
+      </div>
+      <div class="modal__actions">
+        <button id="modal-cancel" class="pbtn">CANCEL</button>
+        <button id="modal-ok" class="pbtn pbtn--primary">OK</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- =========== MAIN PLAYER WINDOW =========== -->
+  <section id="main-window" class="window window--main">
+    <header class="window__title" data-drag-handle>
+      <span class="window__title-text">RETROPLAYER 1.0</span>
+      <span class="window__title-controls">_ □ ✕</span>
+    </header>
+
+    <div class="window__body">
+
+      <!-- LCD: time + track title scrolling -->
+      <div class="lcd">
+        <div class="lcd__time" id="lcd-time">00:00</div>
+        <div class="lcd__bitrate">
+          <span id="lcd-bitrate">--</span> kbps
+          <span id="lcd-freq">--</span> kHz
+          <span class="lcd__channel" id="lcd-channel">stereo</span>
+        </div>
+        <div class="lcd__title">
+          <span class="lcd__title-text" id="lcd-title">*** NO PLAYLIST LOADED ***</span>
+        </div>
+      </div>
+
+      <!-- Visualizer canvas -->
+      <canvas id="visualizer" class="visualizer" width="200" height="40"></canvas>
+
+      <!-- Volume + balance row -->
+      <div class="control-row">
+        <div class="control-row__icon" id="btn-mute" title="Mute">🔊</div>
+        <input type="range" id="volume" class="slider slider--volume" min="0" max="100" value="80" title="Volume">
+        <div class="control-row__separator"></div>
+        <div class="control-row__label">SHUF</div>
+        <button id="btn-shuffle" class="led" title="Shuffle"></button>
+        <div class="control-row__label">REP</div>
+        <button id="btn-repeat" class="led" title="Repeat" data-mode="off"></button>
+      </div>
+
+      <!-- Transport buttons -->
+      <div class="transport">
+        <button id="btn-prev" class="tbtn tbtn--prev" title="Previous">⏮</button>
+        <button id="btn-play" class="tbtn tbtn--play" title="Play">▶</button>
+        <button id="btn-pause" class="tbtn tbtn--pause" title="Pause">⏸</button>
+        <button id="btn-stop" class="tbtn tbtn--stop" title="Stop">⏹</button>
+        <button id="btn-next" class="tbtn tbtn--next" title="Next">⏭</button>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- =========== PLAYLIST WINDOW =========== -->
+  <section id="playlist-window" class="window window--playlist">
+    <header class="window__title" data-drag-handle>
+      <span class="window__title-text">PLAYLIST EDITOR</span>
+      <span class="window__title-controls">_ □ ✕</span>
+    </header>
+
+    <div class="window__body window__body--playlist">
+
+      <div class="playlist-toolbar">
+        <button id="btn-load-file" class="pbtn">+ FILE</button>
+        <button id="btn-load-url" class="pbtn">+ URL</button>
+        <button id="btn-clear" class="pbtn">CLEAR</button>
+        <span class="playlist-count" id="playlist-count">0 tracks</span>
+      </div>
+
+      <ol id="playlist" class="playlist">
+        <!-- tracks injected here -->
+      </ol>
+
+      <div class="playlist-empty" id="playlist-empty">
+        <p>No tracks loaded.</p>
+        <p>Drag &amp; drop a <code>.m3u</code> file, or click <strong>+ FILE</strong> / <strong>+ URL</strong>.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- =========== MEDIA LIBRARY WINDOW =========== -->
+  <section id="library-window" class="window window--library">
+    <header class="window__title" data-drag-handle>
+      <span class="window__title-text">MEDIA LIBRARY</span>
+      <span class="window__title-controls">_ □ ✕</span>
+    </header>
+
+    <div class="window__body window__body--library">
+
+      <div class="library-toolbar">
+        <span class="library-status" id="library-status">Connecting…</span>
+        <button id="btn-library-refresh" class="pbtn" title="Refresh">↻</button>
+      </div>
+
+      <ol id="library-list" class="library-list">
+        <!-- entries injected here -->
+      </ol>
+
+      <div class="library-empty" id="library-empty">
+        <p>No saved playlists.</p>
+        <p>Import a <code>.m3u</code> in the Playlist window — it'll auto-save here and become available on every device on this network.</p>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- Toast notifications -->
+  <div id="toast-container" class="toast-container"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
