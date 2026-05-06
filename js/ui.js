@@ -46,6 +46,14 @@ export class UI {
       libraryList: document.getElementById('library-list'),
       libraryEmpty: document.getElementById('library-empty'),
       btnLibraryRefresh: document.getElementById('btn-library-refresh'),
+      lyricsWindow: document.getElementById('lyrics-window'),
+      lyricsStatus: document.getElementById('lyrics-status'),
+      lyricsContainer: document.getElementById('lyrics-container'),
+      lyricsEmpty: document.getElementById('lyrics-empty'),
+      btnSleep: document.getElementById('btn-sleep'),
+      sleepCountdown: document.getElementById('sleep-countdown'),
+      playlistSearch: document.getElementById('playlist-search'),
+      playlistSearchClear: document.getElementById('playlist-search-clear'),
       mobileTabs: document.getElementById('mobile-tabs'),
       modal: document.getElementById('modal'),
       modalTitle: document.getElementById('modal-title'),
@@ -57,6 +65,9 @@ export class UI {
 
     this._lastTitle = '';
     this._tempLcdTimer = null;
+    this._searchTerm = '';
+    this._searchDebounceTimer = null;
+    this._filteredIndices = null;
   }
 
   init() {
@@ -71,6 +82,7 @@ export class UI {
     this._bindLibraryEvents();
     this._bindMobileTabs();
     this._bindModal();
+    this._bindPlaylistSearch();
 
     // Initialize default active tab on mobile
     this.activateMobileTab('main');
@@ -93,6 +105,13 @@ export class UI {
   }
 
   _bindControls() {
+    if (this.player.isIOS) {
+      this.el.volume.style.opacity = '0.4';
+      this.el.volume.style.pointerEvents = 'none';
+      this.el.btnMute.style.opacity = '0.4';
+      this.el.btnMute.style.pointerEvents = 'none';
+    }
+
     this.el.btnMute.addEventListener('click', () => {
       this.player.setMute(!this.player.muted);
       this.updateVolume();
@@ -116,6 +135,15 @@ export class UI {
       this.playlist.cycleRepeat();
       this.cb.onPersist();
     });
+
+    if (this.el.btnSleep) {
+      this.el.btnSleep.addEventListener('click', () => this.cb.onSleepToggle());
+    }
+  }
+
+  updateSleepTimer(active, remainingText = '') {
+    if (this.el.btnSleep) this.el.btnSleep.classList.toggle('is-on', active);
+    if (this.el.sleepCountdown) this.el.sleepCountdown.textContent = active ? remainingText : '';
   }
 
   _bindLoaders() {
@@ -191,7 +219,7 @@ export class UI {
     // Skip on mobile — accidental drags from tab area are jarring on touch.
     const mq = window.matchMedia('(max-width: 720px)');
     if (mq.matches) return;
-    [this.el.mainWindow, this.el.playlistWindow, this.el.libraryWindow].forEach((win) => {
+    [this.el.mainWindow, this.el.playlistWindow, this.el.libraryWindow, this.el.lyricsWindow].forEach((win) => {
       if (!win) return;
       const handle = win.querySelector('[data-drag-handle]');
       if (!handle) return;
@@ -244,20 +272,77 @@ export class UI {
   }
 
   activateMobileTab(name) {
+    // Resolve all windows fresh every time to handle late DOM
     const map = {
-      main: this.el.mainWindow,
-      playlist: this.el.playlistWindow,
-      library: this.el.libraryWindow,
+      main: document.getElementById('main-window'),
+      playlist: document.getElementById('playlist-window'),
+      library: document.getElementById('library-window'),
+      lyrics: document.getElementById('lyrics-window'),
     };
-    if (!map[name]) return;
+    if (!(name in map)) return;
+
+    // Toggle visibility
     Object.entries(map).forEach(([key, win]) => {
       if (!win) return;
       win.classList.toggle('is-active-tab', key === name);
     });
+
+    // Toggle tab highlight
     if (this.el.mobileTabs) {
       const tabs = this.el.mobileTabs.querySelectorAll('.mobile-tab');
       tabs.forEach((t) => t.classList.toggle('is-active', t.dataset.tab === name));
     }
+  }
+
+  // ---------- Playlist Search ----------
+
+  _bindPlaylistSearch() {
+    if (!this.el.playlistSearch) return;
+
+    this.el.playlistSearch.addEventListener('input', () => {
+      if (this._searchDebounceTimer) clearTimeout(this._searchDebounceTimer);
+      this._searchDebounceTimer = setTimeout(() => {
+        this._applyPlaylistFilter(this.el.playlistSearch.value);
+      }, 200);
+    });
+
+    if (this.el.playlistSearchClear) {
+      this.el.playlistSearchClear.addEventListener('click', () => {
+        this.el.playlistSearch.value = '';
+        this._applyPlaylistFilter('');
+        this.el.playlistSearch.focus();
+      });
+    }
+
+    this.el.playlistSearch.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        this.el.playlistSearch.value = '';
+        this._applyPlaylistFilter('');
+        this.el.playlistSearch.blur();
+      }
+    });
+  }
+
+  _applyPlaylistFilter(term) {
+    this._searchTerm = term.trim().toLowerCase();
+
+    if (this.el.playlistSearchClear) {
+      this.el.playlistSearchClear.hidden = this._searchTerm.length === 0;
+    }
+
+    if (this._searchTerm.length === 0) {
+      this._filteredIndices = null;
+    } else {
+      this._filteredIndices = [];
+      this.playlist.tracks.forEach((track, i) => {
+        const title = (track.title || track.url || '').toLowerCase();
+        if (title.includes(this._searchTerm)) {
+          this._filteredIndices.push(i);
+        }
+      });
+    }
+
+    this.renderPlaylist();
   }
 
   // ---------- Modal (prompt / confirm) ----------
@@ -310,6 +395,48 @@ export class UI {
       document.body.style.overflow = 'hidden';
       // Focus input after layout
       setTimeout(() => this.el.modalInput.focus(), 50);
+    });
+  }
+
+  selectModal({ title = 'SELECT', message = '', options = [] } = {}) {
+    return new Promise((resolve) => {
+      this._modalMode = 'select';
+      this._modalResolver = resolve;
+      this.el.modalTitle.textContent = title;
+      this.el.modalMessage.textContent = message;
+      this.el.modalInput.hidden = true;
+      this.el.modalOk.hidden = true;
+      this.el.modalCancel.textContent = 'CANCEL';
+      this.el.modalCancel.hidden = false;
+
+      // Build option buttons
+      const wrap = document.createElement('div');
+      wrap.className = 'modal__options';
+      wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;';
+      options.forEach((opt) => {
+        const btn = document.createElement('button');
+        btn.className = 'pbtn pbtn--primary';
+        btn.style.cssText = 'flex:1;min-width:60px;padding:10px 8px;font-size:9px;';
+        btn.textContent = opt.label;
+        btn.addEventListener('click', () => {
+          wrap.remove();
+          this.el.modalOk.hidden = false;
+          this._resolveModal(opt.value);
+        });
+        wrap.appendChild(btn);
+      });
+      this.el.modalMessage.after(wrap);
+
+      this.el.modal.hidden = false;
+      document.body.style.overflow = 'hidden';
+
+      // Cleanup on cancel
+      const origResolver = this._modalResolver;
+      this._modalResolver = (v) => {
+        wrap.remove();
+        this.el.modalOk.hidden = false;
+        origResolver(v);
+      };
     });
   }
 
@@ -398,6 +525,12 @@ export class UI {
   _bindPlaylistEvents() {
     this.playlist.addEventListener('change', (e) => {
       const reason = e.detail && e.detail.reason;
+      if (reason === 'load' || reason === 'clear') {
+        this._searchTerm = '';
+        this._filteredIndices = null;
+        if (this.el.playlistSearch) this.el.playlistSearch.value = '';
+        if (this.el.playlistSearchClear) this.el.playlistSearchClear.hidden = true;
+      }
       this.renderPlaylist();
       this.updateShuffleRepeat();
       if (reason === 'load' || reason === 'clear') {
@@ -410,11 +543,11 @@ export class UI {
 
   renderPlaylist() {
     const list = this.el.playlist;
-    const tracks = this.playlist.tracks;
+    const allTracks = this.playlist.tracks;
 
     list.innerHTML = '';
 
-    if (tracks.length === 0) {
+    if (allTracks.length === 0) {
       this.el.playlistEmpty.hidden = false;
       this.el.playlist.style.display = 'none';
     } else {
@@ -422,16 +555,20 @@ export class UI {
       this.el.playlist.style.display = '';
     }
 
+    const isFiltered = this._filteredIndices !== null;
+    const indices = isFiltered ? this._filteredIndices : allTracks.map((_, i) => i);
+
     const frag = document.createDocumentFragment();
-    tracks.forEach((track, i) => {
+    indices.forEach((origIdx) => {
+      const track = allTracks[origIdx];
       const li = document.createElement('li');
       li.className = 'playlist__item';
-      if (i === this.playlist.currentIndex) li.classList.add('is-current');
-      li.dataset.index = i;
+      if (origIdx === this.playlist.currentIndex) li.classList.add('is-current');
+      li.dataset.index = origIdx;
 
       const idx = document.createElement('span');
       idx.className = 'playlist__index';
-      idx.textContent = String(i + 1).padStart(2, '0') + '.';
+      idx.textContent = String(origIdx + 1).padStart(2, '0') + '.';
 
       const title = document.createElement('span');
       title.className = 'playlist__title';
@@ -446,8 +583,13 @@ export class UI {
     });
     list.appendChild(frag);
 
-    this.el.playlistCount.textContent =
-      `${tracks.length} track${tracks.length === 1 ? '' : 's'}`;
+    if (isFiltered) {
+      this.el.playlistCount.textContent =
+        `${indices.length} of ${allTracks.length} tracks`;
+    } else {
+      this.el.playlistCount.textContent =
+        `${allTracks.length} track${allTracks.length === 1 ? '' : 's'}`;
+    }
 
     // Scroll current into view
     const current = list.querySelector('.is-current');
@@ -483,7 +625,8 @@ export class UI {
     if (Number(this.el.volume.value) !== Math.round(v * 100)) {
       this.el.volume.value = String(Math.round(v * 100));
     }
-    this.el.btnMute.textContent = muted || v === 0 ? '🔇' : v < 0.5 ? '🔉' : '🔊';
+    const icon = muted || v === 0 ? 'volume_off' : v < 0.5 ? 'volume_down' : 'volume_up';
+    this.el.btnMute.innerHTML = `<span class="mi">${icon}</span>`;
   }
 
   updateShuffleRepeat() {
@@ -577,13 +720,79 @@ export class UI {
 
       const del = document.createElement('button');
       del.className = 'library-item__delete';
-      del.textContent = '×';
+      del.innerHTML = '<span class="mi" style="font-size:14px">delete</span>';
       del.title = 'Delete';
 
       li.append(main, del);
       frag.appendChild(li);
     }
     list.appendChild(frag);
+  }
+
+  // ---------- Lyrics ----------
+
+  setLyricsStatus(text, kind = 'idle') {
+    if (!this.el.lyricsStatus) return;
+    this.el.lyricsStatus.textContent = text;
+    this.el.lyricsStatus.classList.toggle('is-loading', kind === 'loading');
+    this.el.lyricsStatus.classList.toggle('is-synced', kind === 'synced');
+  }
+
+  renderSyncedLyrics(lines) {
+    const c = this.el.lyricsContainer;
+    if (!c) return;
+    c.innerHTML = '';
+    if (this.el.lyricsEmpty) this.el.lyricsEmpty.hidden = true;
+    const frag = document.createDocumentFragment();
+    lines.forEach((line, i) => {
+      const div = document.createElement('div');
+      div.className = 'lyrics-line';
+      div.dataset.time = line.time;
+      div.dataset.index = i;
+      div.textContent = line.text || '\u266A';
+      frag.appendChild(div);
+    });
+    c.appendChild(frag);
+  }
+
+  renderPlainLyrics(text) {
+    const c = this.el.lyricsContainer;
+    if (!c) return;
+    c.innerHTML = '';
+    if (this.el.lyricsEmpty) this.el.lyricsEmpty.hidden = true;
+    const frag = document.createDocumentFragment();
+    text.split('\n').forEach((line) => {
+      const div = document.createElement('div');
+      div.className = 'lyrics-line';
+      div.textContent = line || ' ';
+      frag.appendChild(div);
+    });
+    c.appendChild(frag);
+  }
+
+  updateLyricsHighlight(currentTime) {
+    const c = this.el.lyricsContainer;
+    if (!c) return;
+    const lines = c.querySelectorAll('.lyrics-line[data-time]');
+    if (lines.length === 0) return;
+    let activeIdx = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      if (currentTime >= parseFloat(lines[i].dataset.time)) { activeIdx = i; break; }
+    }
+    lines.forEach((line, i) => {
+      line.classList.toggle('is-active', i === activeIdx);
+      line.classList.toggle('is-past', i < activeIdx);
+    });
+    if (activeIdx >= 0 && lines[activeIdx]) {
+      lines[activeIdx].scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }
+  }
+
+  clearLyrics() {
+    const c = this.el.lyricsContainer;
+    if (c) c.innerHTML = '';
+    if (this.el.lyricsEmpty) this.el.lyricsEmpty.hidden = false;
+    this.setLyricsStatus('No track playing');
   }
 
   toast(message, { type = 'info', duration = 4000 } = {}) {

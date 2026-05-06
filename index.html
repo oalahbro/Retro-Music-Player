@@ -7,6 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=VT323&family=Press+Start+2P&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="css/main.css">
 </head>
 <body>
@@ -27,9 +28,10 @@
 
   <!-- Mobile tab bar (visible only on mobile via CSS) -->
   <nav id="mobile-tabs" class="mobile-tabs" role="tablist">
-    <button class="mobile-tab is-active" data-tab="main"     role="tab">▶ NOW</button>
-    <button class="mobile-tab"           data-tab="playlist" role="tab">≡ PLAYLIST</button>
-    <button class="mobile-tab"           data-tab="library"  role="tab">★ LIBRARY</button>
+    <button class="mobile-tab is-active" data-tab="main"     role="tab"><span class="mi mi-tab">play_circle</span> NOW</button>
+    <button class="mobile-tab"           data-tab="playlist" role="tab"><span class="mi mi-tab">queue_music</span> PLAYLIST</button>
+    <button class="mobile-tab"           data-tab="library"  role="tab"><span class="mi mi-tab">library_music</span> LIBRARY</button>
+    <button class="mobile-tab"           data-tab="lyrics"   role="tab"><span class="mi mi-tab">lyrics</span> LYRICS</button>
   </nav>
 
   <!-- Generic modal -->
@@ -78,22 +80,25 @@
 
       <!-- Volume + balance row -->
       <div class="control-row">
-        <div class="control-row__icon" id="btn-mute" title="Mute">🔊</div>
+        <div class="control-row__icon" id="btn-mute" title="Mute"><span class="mi">volume_up</span></div>
         <input type="range" id="volume" class="slider slider--volume" min="0" max="100" value="80" title="Volume">
         <div class="control-row__separator"></div>
         <div class="control-row__label">SHUF</div>
         <button id="btn-shuffle" class="led" title="Shuffle"></button>
         <div class="control-row__label">REP</div>
         <button id="btn-repeat" class="led" title="Repeat" data-mode="off"></button>
+        <div class="control-row__separator"></div>
+        <button id="btn-sleep" class="led" title="Sleep Timer"><span class="mi" style="font-size:10px">bedtime</span></button>
+        <span class="sleep-countdown" id="sleep-countdown"></span>
       </div>
 
       <!-- Transport buttons -->
       <div class="transport">
-        <button id="btn-prev" class="tbtn tbtn--prev" title="Previous">⏮</button>
-        <button id="btn-play" class="tbtn tbtn--play" title="Play">▶</button>
-        <button id="btn-pause" class="tbtn tbtn--pause" title="Pause">⏸</button>
-        <button id="btn-stop" class="tbtn tbtn--stop" title="Stop">⏹</button>
-        <button id="btn-next" class="tbtn tbtn--next" title="Next">⏭</button>
+        <button id="btn-prev" class="tbtn tbtn--prev" title="Previous"><span class="mi">skip_previous</span></button>
+        <button id="btn-play" class="tbtn tbtn--play" title="Play"><span class="mi">play_arrow</span></button>
+        <button id="btn-pause" class="tbtn tbtn--pause" title="Pause"><span class="mi">pause</span></button>
+        <button id="btn-stop" class="tbtn tbtn--stop" title="Stop"><span class="mi">stop</span></button>
+        <button id="btn-next" class="tbtn tbtn--next" title="Next"><span class="mi">skip_next</span></button>
       </div>
 
     </div>
@@ -109,10 +114,15 @@
     <div class="window__body window__body--playlist">
 
       <div class="playlist-toolbar">
-        <button id="btn-load-file" class="pbtn">+ FILE</button>
-        <button id="btn-load-url" class="pbtn">+ URL</button>
-        <button id="btn-clear" class="pbtn">CLEAR</button>
+        <button id="btn-load-file" class="pbtn"><span class="mi mi-btn">upload_file</span> FILE</button>
+        <button id="btn-load-url" class="pbtn"><span class="mi mi-btn">link</span> URL</button>
+        <button id="btn-clear" class="pbtn"><span class="mi mi-btn">delete</span> CLEAR</button>
         <span class="playlist-count" id="playlist-count">0 tracks</span>
+        <div class="playlist-search" id="playlist-search-wrapper">
+          <span class="mi" style="font-size:14px;color:#666">search</span>
+          <input type="text" id="playlist-search" class="playlist-search__input" placeholder="Filter tracks...">
+          <button id="playlist-search-clear" class="playlist-search__clear" title="Clear filter" hidden><span class="mi" style="font-size:14px">close</span></button>
+        </div>
       </div>
 
       <ol id="playlist" class="playlist">
@@ -138,7 +148,7 @@
 
       <div class="library-toolbar">
         <span class="library-status" id="library-status">Connecting…</span>
-        <button id="btn-library-refresh" class="pbtn" title="Refresh">↻</button>
+        <button id="btn-library-refresh" class="pbtn" title="Refresh"><span class="mi mi-btn">refresh</span></button>
       </div>
 
       <ol id="library-list" class="library-list">
@@ -152,6 +162,33 @@
 
     </div>
   </section>
+
+  <!-- =========== LYRICS WINDOW =========== -->
+  <section id="lyrics-window" class="window window--lyrics">
+    <header class="window__title" data-drag-handle>
+      <span class="window__title-text">LYRICS</span>
+      <span class="window__title-controls">_ □ ✕</span>
+    </header>
+    <div class="window__body window__body--lyrics">
+      <div class="lyrics-status" id="lyrics-status">No track playing</div>
+      <div class="lyrics-container" id="lyrics-container">
+        <div class="lyrics-empty" id="lyrics-empty">
+          <p>Play a track to auto-fetch lyrics.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Debug Log Panel -->
+  <div id="log-toggle" class="log-toggle" title="Toggle debug log">LOG</div>
+  <div id="log-panel" class="log-panel" hidden>
+    <div class="log-panel__header">
+      <span>DEBUG LOG</span>
+      <button id="log-clear" class="log-panel__btn">CLEAR</button>
+      <button id="log-close" class="log-panel__btn">✕</button>
+    </div>
+    <div id="log-list" class="log-panel__list"></div>
+  </div>
 
   <!-- Toast notifications -->
   <div id="toast-container" class="toast-container"></div>

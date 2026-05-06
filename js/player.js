@@ -1,23 +1,29 @@
 /**
- * Player — wrapper around HTMLAudioElement with Web Audio AnalyserNode hookup.
+ * Player — wrapper around HTMLAudioElement with Web Audio API.
+ *
+ * - Desktop: AudioContext + GainNode for software volume + AnalyserNode for visualizer
+ * - iOS: Native <audio> playback for background audio support. Volume is
+ *   hardware-only (iOS Safari limitation — audio.volume is read-only).
  *
  * Emits events via EventTarget:
  *   'play', 'pause', 'ended', 'error', 'timeupdate', 'loadedmetadata', 'volumechange'
  */
+
+const _isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
+  (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
 export class Player extends EventTarget {
   constructor(audioEl) {
     super();
     this.audio = audioEl;
-    // NOTE: crossOrigin is intentionally NOT set. Many real-world audio hosts
-    // (Google Drive, etc.) send Cross-Origin-Resource-Policy: same-site which
-    // blocks audio loading when crossOrigin="anonymous" is set. Without it,
-    // playback works for all hosts but the AudioContext route is disabled
-    // (visualizer falls back to sine-wave animation).
 
     this._audioCtx = null;
     this._analyser = null;
+    this._gainNode = null;
     this._sourceNode = null;
     this._analyserAvailable = false;
+    this._volume = 0.8;
+    this._muted = false;
 
     const forward = (name) => () => this.dispatchEvent(new Event(name));
     this.audio.addEventListener('play', forward('play'));
@@ -25,7 +31,6 @@ export class Player extends EventTarget {
     this.audio.addEventListener('ended', forward('ended'));
     this.audio.addEventListener('timeupdate', forward('timeupdate'));
     this.audio.addEventListener('loadedmetadata', forward('loadedmetadata'));
-    this.audio.addEventListener('volumechange', forward('volumechange'));
     this.audio.addEventListener('error', () => {
       this.dispatchEvent(new CustomEvent('error', {
         detail: this.audio.error,
@@ -33,17 +38,18 @@ export class Player extends EventTarget {
     });
   }
 
-  /** Load a new URL into the audio element (does not auto-play) */
   load(url) {
     this.audio.src = url;
     this.audio.load();
   }
 
   async play() {
+    if (!_isIOS) {
+      this._initAudioContextLazy();
+    }
     try {
       await this.audio.play();
     } catch (err) {
-      // Autoplay policy or load error
       this.dispatchEvent(new CustomEvent('error', { detail: err }));
       throw err;
     }
@@ -57,30 +63,50 @@ export class Player extends EventTarget {
   }
 
   setVolume(v) {
-    this.audio.volume = Math.max(0, Math.min(1, v));
+    v = Math.max(0, Math.min(1, v));
+    this._volume = v;
+    this._applyVolume();
+    this.dispatchEvent(new Event('volumechange'));
   }
 
   setMute(muted) {
-    this.audio.muted = !!muted;
+    this._muted = !!muted;
+    this._applyVolume();
+    this.dispatchEvent(new Event('volumechange'));
   }
 
-  get volume() { return this.audio.volume; }
-  get muted() { return this.audio.muted; }
+  _applyVolume() {
+    const effectiveVol = this._muted ? 0 : this._volume;
+    if (this._gainNode) {
+      this._gainNode.gain.value = effectiveVol;
+      try { this.audio.volume = 1; this.audio.muted = false; } catch {}
+    } else {
+      try {
+        this.audio.volume = this._volume;
+        this.audio.muted = this._muted;
+      } catch {}
+    }
+  }
+
+  get volume() { return this._volume; }
+  get muted() { return this._muted; }
   get currentTime() { return this.audio.currentTime; }
   get duration() { return this.audio.duration; }
   get paused() { return this.audio.paused; }
+  get isIOS() { return _isIOS; }
 
-  /**
-   * Returns AnalyserNode if available, else null.
-   * Only available after first play AND if CORS allows reading samples.
-   */
   getAnalyser() {
     return this._analyser;
   }
 
+  resumeContext() {
+    if (this._audioCtx && this._audioCtx.state !== 'running') {
+      this._audioCtx.resume().catch(() => {});
+    }
+  }
+
   _initAudioContextLazy() {
     if (this._audioCtx) {
-      // Resume if suspended (Chrome autoplay policy)
       if (this._audioCtx.state === 'suspended') {
         this._audioCtx.resume().catch(() => {});
       }
@@ -96,16 +122,18 @@ export class Player extends EventTarget {
       this._analyser = this._audioCtx.createAnalyser();
       this._analyser.fftSize = 128;
       this._analyser.smoothingTimeConstant = 0.7;
+      this._gainNode = this._audioCtx.createGain();
+      this._gainNode.gain.value = this._muted ? 0 : this._volume;
 
       this._sourceNode.connect(this._analyser);
-      this._analyser.connect(this._audioCtx.destination);
+      this._analyser.connect(this._gainNode);
+      this._gainNode.connect(this._audioCtx.destination);
 
       this._analyserAvailable = true;
     } catch (err) {
-      // CORS or other failure — analyser unavailable, but audio still plays
-      // through normal HTMLAudioElement path (we did not connect anything).
       console.warn('[player] AudioContext init failed:', err);
       this._analyser = null;
+      this._gainNode = null;
       this._analyserAvailable = false;
     }
   }

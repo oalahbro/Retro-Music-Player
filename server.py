@@ -27,10 +27,12 @@ import os
 import re
 import socket
 import socketserver
+import ssl
 import sys
 import time
 import urllib.parse
 import urllib.request
+import http.cookiejar
 import uuid
 from pathlib import Path
 
@@ -39,6 +41,36 @@ DEFAULT_HOST = '0.0.0.0'
 DIRECTORY = Path(os.path.dirname(os.path.abspath(__file__)))
 PLAYLISTS_DIR = DIRECTORY / 'playlists'
 PLAYLISTS_DIR.mkdir(exist_ok=True)
+LOGS_DIR = DIRECTORY / 'logs'
+LOGS_DIR.mkdir(exist_ok=True)
+LOG_FILE = LOGS_DIR / 'server.log'
+
+# ===================== Logger =====================
+
+import logging
+
+_logger = logging.getLogger('retroplayer')
+_logger.setLevel(logging.DEBUG)
+
+# File handler — persistent log
+_fh = logging.FileHandler(str(LOG_FILE), encoding='utf-8')
+_fh.setLevel(logging.DEBUG)
+_fh.setFormatter(logging.Formatter(
+    '[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+))
+_logger.addHandler(_fh)
+
+# Console handler
+_ch = logging.StreamHandler(sys.stderr)
+_ch.setLevel(logging.INFO)
+_ch.setFormatter(logging.Formatter(
+    '[%(asctime)s] [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+))
+_logger.addHandler(_ch)
+
+log = _logger
 
 # Headers from upstream we DO NOT forward through the proxy.
 BLOCKED_RESPONSE_HEADERS = {
@@ -59,6 +91,21 @@ BLOCKED_RESPONSE_HEADERS = {
 }
 
 API_PLAYLIST_RE = re.compile(r'^/api/playlists(?:/([^/?#]+))?/?$')
+
+# Shared cookie-enabled opener for proxy requests.
+# Google Drive (and similar) requires cookies for redirects & download tokens.
+_cookie_jar = http.cookiejar.CookieJar()
+_ssl_ctx = ssl.create_default_context()
+_url_opener = urllib.request.build_opener(
+    urllib.request.HTTPCookieProcessor(_cookie_jar),
+    urllib.request.HTTPSHandler(context=_ssl_ctx),
+)
+
+PROXY_UA = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+    'AppleWebKit/537.36 (KHTML, like Gecko) '
+    'Chrome/125.0.0.0 Safari/537.36'
+)
 
 
 # ===================== Playlist storage =====================
@@ -83,7 +130,7 @@ def list_playlists() -> list[dict]:
                 'importedAt': data.get('importedAt', 0),
             })
         except Exception as e:
-            sys.stderr.write(f'[lib] skip corrupt {p.name}: {e}\n')
+            log.warning(f'skip corrupt playlist {p.name}: {e}')
     items.sort(key=lambda x: x.get('importedAt') or 0, reverse=True)
     return items
 
@@ -291,33 +338,69 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, 'Only http(s) URLs are allowed')
                 return
 
+            # Extract short name for logging
+            short = target.split('/')[-1][:60] if '/' in target else target[:60]
+            log.info(f'PROXY START → {short}')
+
             req_headers = {
-                'User-Agent': 'Mozilla/5.0 (RetroPlayer Proxy)',
+                'User-Agent': PROXY_UA,
                 'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
             }
             range_h = self.headers.get('Range')
             if range_h:
                 req_headers['Range'] = range_h
+                log.debug(f'  Range: {range_h}')
 
-            req = urllib.request.Request(target, headers=req_headers)
-            try:
-                resp = urllib.request.urlopen(req, timeout=30)
-            except urllib.error.HTTPError as he:
-                self.send_response(he.code)
-                for k, v in he.headers.items():
-                    if k.lower() in BLOCKED_RESPONSE_HEADERS:
-                        continue
-                    self.send_header(k, v)
-                self._cors_headers()
-                self.end_headers()
-                if not head_only:
-                    try:
-                        self.wfile.write(he.read())
-                    except Exception:
-                        pass
+            # Google Drive: resolve download URL with confirmation token
+            actual_url = target
+            if 'drive.google.com' in target or 'drive.usercontent.google.com' in target:
+                actual_url = self._resolve_gdrive_url(target, req_headers)
+
+            max_retries = 3
+            last_err = None
+            resp = None
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    req = urllib.request.Request(actual_url, headers=req_headers)
+                    resp = _url_opener.open(req, timeout=30)
+                    break
+                except urllib.error.HTTPError as he:
+                    log.warning(f'PROXY HTTP {he.code} ← {short}')
+                    self.send_response(he.code)
+                    for k, v in he.headers.items():
+                        if k.lower() in BLOCKED_RESPONSE_HEADERS:
+                            continue
+                        self.send_header(k, v)
+                    self._cors_headers()
+                    self.end_headers()
+                    if not head_only:
+                        try:
+                            self.wfile.write(he.read())
+                        except Exception:
+                            pass
+                    return
+                except (ConnectionResetError, ConnectionAbortedError,
+                        OSError, urllib.error.URLError, TimeoutError) as e:
+                    last_err = e
+                    log.warning(
+                        f'PROXY RETRY {attempt}/{max_retries} '
+                        f'{type(e).__name__}: {e} ← {short}'
+                    )
+                    if attempt < max_retries:
+                        time.sleep(1 * attempt)
+                    continue
+            else:
+                log.error(f'PROXY FAILED after {max_retries} retries ← {short}: {last_err}')
+                self.send_error(502, f'Proxy failed after {max_retries} retries: {last_err}')
                 return
 
             with resp:
+                ct = resp.headers.get('Content-Type', '?')
+                cl = resp.headers.get('Content-Length', '?')
+                log.info(f'PROXY OK {resp.status} [{ct}] {cl}B ← {short}')
+
                 self.send_response(resp.status)
                 for k, v in resp.headers.items():
                     if k.lower() in BLOCKED_RESPONSE_HEADERS:
@@ -335,23 +418,85 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if head_only:
                     return
 
+                bytes_sent = 0
                 while True:
-                    chunk = resp.read(64 * 1024)
+                    try:
+                        chunk = resp.read(64 * 1024)
+                    except (ConnectionResetError, ConnectionAbortedError,
+                            OSError, TimeoutError) as e:
+                        log.warning(f'PROXY upstream read error after {bytes_sent}B: {e}')
+                        break
                     if not chunk:
                         break
                     try:
                         self.wfile.write(chunk)
-                    except (BrokenPipeError, ConnectionResetError):
+                        bytes_sent += len(chunk)
+                    except (BrokenPipeError, ConnectionResetError,
+                            ConnectionAbortedError, OSError):
+                        # Client disconnected (e.g. user skipped track) — this is normal
+                        log.debug(f'PROXY client disconnected after {bytes_sent}B ← {short}')
                         break
 
+                log.info(f'PROXY DONE {bytes_sent}B ← {short}')
+
         except Exception as e:
+            log.error(f'PROXY ERROR {type(e).__name__}: {e}')
             try:
                 self.send_error(502, f'Proxy error: {e}')
             except Exception:
                 pass
 
+    def _resolve_gdrive_url(self, url: str, headers: dict) -> str:
+        """Follow Google Drive redirects and handle confirmation tokens."""
+        try:
+            log.debug(f'GDrive resolving: {url[:80]}')
+            req = urllib.request.Request(url, headers=headers)
+            resp = _url_opener.open(req, timeout=15)
+            final_url = resp.url
+
+            content_type = resp.headers.get('Content-Type', '')
+            if 'text/html' in content_type:
+                body = resp.read(50000).decode('utf-8', errors='ignore')
+                resp.close()
+
+                import re as _re
+                confirm_match = _re.search(
+                    r'confirm=([a-zA-Z0-9_-]+)', body
+                )
+                if confirm_match:
+                    token = confirm_match.group(1)
+                    parsed = urllib.parse.urlparse(url)
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    file_id = qs.get('id', [''])[0]
+                    if file_id:
+                        confirmed = (
+                            f'https://drive.usercontent.google.com/download'
+                            f'?id={file_id}&export=download&confirm={token}'
+                        )
+                        log.info(f'GDrive confirm token: {token}')
+                        return confirmed
+
+                dl_match = _re.search(
+                    r'href="(/uc\?export=download[^"]*)"', body
+                )
+                if dl_match:
+                    resolved = 'https://drive.google.com' + dl_match.group(1).replace('&amp;', '&')
+                    log.info('GDrive resolved from HTML link')
+                    return resolved
+
+                log.warning('GDrive returned HTML but no confirm token found')
+                return url
+            else:
+                resp.close()
+                if final_url != url:
+                    log.info(f'GDrive redirected → {final_url[:80]}')
+                return final_url
+        except Exception as e:
+            log.warning(f'GDrive resolve failed: {e}, using original URL')
+            return url
+
     def log_message(self, fmt, *args):
-        sys.stderr.write(f'[{self.log_date_time_string()}] {fmt % args}\n')
+        log.debug(fmt % args)
 
 
 class ThreadedServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
